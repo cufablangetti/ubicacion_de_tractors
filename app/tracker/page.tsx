@@ -18,7 +18,7 @@ export default function TrackerPage() {
   const [map, setMap] = useState<google.maps.Map | null>(null);
   const [marker, setMarker] = useState<google.maps.Marker | null>(null);
   const [path, setPath] = useState<Position[]>([]);
-  const [polyline, setPolyline] = useState<google.maps.Polyline | null>(null);
+  const polylineRef = useRef<google.maps.Polyline | null>(null);
   const [isTracking, setIsTracking] = useState(false);
   const [totalDistance, setTotalDistance] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState(0);
@@ -172,9 +172,9 @@ export default function TrackerPage() {
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        // Filtrar posiciones con baja precisión (accuracy > 50 metros)
-        if (position.coords.accuracy > 50) {
-          console.log('Precisión baja, ignorando posición:', position.coords.accuracy);
+        // Filtrar posiciones con baja precisión (accuracy > 20 metros para mayor precisión)
+        if (position.coords.accuracy > 20) {
+          console.log('⚠️ Precisión baja ignorada:', position.coords.accuracy.toFixed(1), 'm');
           return;
         }
 
@@ -186,16 +186,19 @@ export default function TrackerPage() {
           accuracy: position.coords.accuracy,
         };
 
-        setCurrentSpeed(position.coords.speed ? position.coords.speed * 3.6 : 0); // Convertir m/s a km/h
+        // Actualizar estados inmediatamente
+        const speedKmh = position.coords.speed ? position.coords.speed * 3.6 : 0;
+        setCurrentSpeed(speedKmh);
         setAccuracy(position.coords.accuracy);
         setLastUpdate(new Date());
+
+        console.log(`📍 GPS: ${newPos.lat.toFixed(6)}, ${newPos.lng.toFixed(6)} | Precisión: ${position.coords.accuracy.toFixed(1)}m | Velocidad: ${speedKmh.toFixed(1)} km/h`);
 
         // Actualizar marcador con color según precisión
         if (marker) {
           marker.setPosition({ lat: newPos.lat, lng: newPos.lng });
-          // Cambiar color según precisión: Verde (buena), Amarillo (media), Rojo (baja)
-          const color = position.coords.accuracy < 20 ? '#00FF00' : 
-                       position.coords.accuracy < 50 ? '#FFD700' : '#FF0000';
+          const color = position.coords.accuracy < 10 ? '#00FF00' : 
+                       position.coords.accuracy < 20 ? '#FFD700' : '#FF0000';
           marker.setIcon({
             path: google.maps.SymbolPath.CIRCLE,
             scale: 10,
@@ -206,73 +209,71 @@ export default function TrackerPage() {
           });
         }
 
-        // Actualizar mapa para seguir la ubicación (solo si está en primer plano)
+        // Centrar mapa en la ubicación actual
         if (map && document.visibilityState === 'visible') {
           map.panTo({ lat: newPos.lat, lng: newPos.lng });
         }
 
-        // Actualizar ruta
+        // Actualizar ruta y calcular distancia
         setPath((prevPath) => {
           const updatedPath = [...prevPath, newPos];
 
-          // Calcular distancia solo si hay precisión buena y movimiento significativo
+          // Calcular y actualizar distancia
           if (prevPath.length > 0) {
             const lastPos = prevPath[prevPath.length - 1];
             const distance = calculateDistance(lastPos, newPos);
             
-            // Solo agregar distancia si es mayor a 5 metros (evitar ruido GPS)
-            if (distance > 0.005) { // 0.005 km = 5 metros
+            // Solo agregar distancia si es mayor a 2 metros (reducir ruido GPS)
+            if (distance > 0.002) { // 0.002 km = 2 metros
               setTotalDistance((prev) => {
                 const newTotal = prev + distance;
-                console.log('📍 Nueva posición - Distancia acumulada:', newTotal.toFixed(2), 'km');
+                console.log('� Distancia acumulada:', newTotal.toFixed(3), 'km (+', (distance * 1000).toFixed(1), 'm)');
                 return newTotal;
               });
+            }
+          }
+
+          // Actualizar polyline inmediatamente
+          if (map && updatedPath.length > 1) {
+            const pathCoords = updatedPath.map(p => ({ lat: p.lat, lng: p.lng }));
+            
+            if (polylineRef.current) {
+              // Actualizar polyline existente
+              polylineRef.current.setPath(pathCoords);
+            } else {
+              // Crear nuevo polyline
+              polylineRef.current = new google.maps.Polyline({
+                path: pathCoords,
+                geodesic: true,
+                strokeColor: '#FF0000',
+                strokeOpacity: 1.0,
+                strokeWeight: 4,
+                map: map,
+              });
+              console.log('🗺️ Polyline creado');
             }
           }
 
           return updatedPath;
         });
 
-        // Actualizar polyline fuera del setState para evitar problemas de sincronización
-        if (map) {
-          setPath((currentPath) => {
-            if (currentPath.length > 1) {
-              if (polyline) {
-                polyline.setPath(currentPath.map(p => ({ lat: p.lat, lng: p.lng })));
-              } else {
-                const newPolyline = new google.maps.Polyline({
-                  path: currentPath.map(p => ({ lat: p.lat, lng: p.lng })),
-                  geodesic: true,
-                  strokeColor: '#FF0000',
-                  strokeOpacity: 1.0,
-                  strokeWeight: 4,
-                  map: map,
-                });
-                setPolyline(newPolyline);
-                console.log('🗺️ Polyline creado con', currentPath.length, 'puntos');
-              }
-            }
-            return currentPath;
-          });
-        }
-
         // Guardar en localStorage para persistencia
         savePositionToStorage(newPos);
       },
       (error) => {
-        console.error('Error de seguimiento:', error);
+        console.error('❌ Error GPS:', error.message, '(code:', error.code, ')');
         if (error.code === 1) {
-          alert('Por favor permite el acceso a tu ubicación en la configuración del navegador');
+          alert('⚠️ Acceso a ubicación denegado. Por favor permite el acceso en la configuración del navegador.');
         } else if (error.code === 2) {
-          alert('No se pudo obtener tu ubicación. Verifica que el GPS esté activado');
+          alert('⚠️ No se pudo obtener tu ubicación. Verifica que el GPS esté activado.');
         } else if (error.code === 3) {
-          console.log('Timeout de GPS, reintentando...');
+          console.log('⏱️ Timeout GPS, reintentando...');
         }
       },
       {
-        enableHighAccuracy: true, // Usar GPS de alta precisión
-        timeout: 10000, // Aumentar timeout a 10 segundos
-        maximumAge: 0, // No usar posiciones en caché
+        enableHighAccuracy: true, // GPS de alta precisión
+        timeout: 5000, // Timeout de 5 segundos (más rápido)
+        maximumAge: 0, // Nunca usar caché, siempre posición fresca
       }
     );
   };
