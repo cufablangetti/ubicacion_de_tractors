@@ -9,6 +9,7 @@ interface Position {
   lng: number;
   timestamp: number;
   speed?: number;
+  accuracy?: number;
 }
 
 export default function TrackerPage() {
@@ -22,7 +23,10 @@ export default function TrackerPage() {
   const [totalDistance, setTotalDistance] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState(0);
   const [userName, setUserName] = useState('');
+  const [accuracy, setAccuracy] = useState(0);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const watchIdRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<any>(null);
 
   useEffect(() => {
     const userId = localStorage.getItem('userId');
@@ -37,12 +41,39 @@ export default function TrackerPage() {
     setUserName(name || userId);
     initializeMap();
 
+    // Solicitar permisos de notificación para alertas en segundo plano
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
+    // Detectar cuando la app va a segundo plano
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden' && isTracking) {
+        // Mostrar notificación persistente
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification('DIBIAGI GPS Activo', {
+            body: 'El rastreo GPS continúa en segundo plano',
+            icon: '/icon-192x192.png',
+            badge: '/icon-192x192.png',
+            tag: 'gps-tracking',
+            requireInteraction: true,
+          });
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release();
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [router]);
+  }, [router, isTracking]);
 
   const initializeMap = async () => {
     if (!mapRef.current) return;
@@ -107,10 +138,24 @@ export default function TrackerPage() {
     }
   };
 
-  const startTracking = () => {
+  const startTracking = async () => {
     if (!navigator.geolocation) {
       alert('Tu dispositivo no soporta geolocalización');
       return;
+    }
+
+    // Solicitar Wake Lock para mantener la pantalla activa
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        console.log('Wake Lock activado - pantalla permanecerá encendida');
+        
+        wakeLockRef.current.addEventListener('release', () => {
+          console.log('Wake Lock fue liberado');
+        });
+      }
+    } catch (err) {
+      console.log('Wake Lock no disponible:', err);
     }
 
     setIsTracking(true);
@@ -119,22 +164,42 @@ export default function TrackerPage() {
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
+        // Filtrar posiciones con baja precisión (accuracy > 50 metros)
+        if (position.coords.accuracy > 50) {
+          console.log('Precisión baja, ignorando posición:', position.coords.accuracy);
+          return;
+        }
+
         const newPos: Position = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
           timestamp: position.timestamp,
           speed: position.coords.speed || 0,
+          accuracy: position.coords.accuracy,
         };
 
         setCurrentSpeed(position.coords.speed ? position.coords.speed * 3.6 : 0); // Convertir m/s a km/h
+        setAccuracy(position.coords.accuracy);
+        setLastUpdate(new Date());
 
-        // Actualizar marcador
+        // Actualizar marcador con color según precisión
         if (marker) {
           marker.setPosition({ lat: newPos.lat, lng: newPos.lng });
+          // Cambiar color según precisión: Verde (buena), Amarillo (media), Rojo (baja)
+          const color = position.coords.accuracy < 20 ? '#00FF00' : 
+                       position.coords.accuracy < 50 ? '#FFD700' : '#FF0000';
+          marker.setIcon({
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 10,
+            fillColor: color,
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 2,
+          });
         }
 
-        // Actualizar mapa para seguir la ubicación
-        if (map) {
+        // Actualizar mapa para seguir la ubicación (solo si está en primer plano)
+        if (map && document.visibilityState === 'visible') {
           map.panTo({ lat: newPos.lat, lng: newPos.lng });
         }
 
@@ -142,11 +207,15 @@ export default function TrackerPage() {
         setPath((prevPath) => {
           const updatedPath = [...prevPath, newPos];
 
-          // Calcular distancia
+          // Calcular distancia solo si hay precisión buena y movimiento significativo
           if (prevPath.length > 0) {
             const lastPos = prevPath[prevPath.length - 1];
             const distance = calculateDistance(lastPos, newPos);
-            setTotalDistance((prev) => prev + distance);
+            
+            // Solo agregar distancia si es mayor a 5 metros (evitar ruido GPS)
+            if (distance > 0.005) { // 0.005 km = 5 metros
+              setTotalDistance((prev) => prev + distance);
+            }
           }
 
           // Actualizar polyline
@@ -174,22 +243,44 @@ export default function TrackerPage() {
       },
       (error) => {
         console.error('Error de seguimiento:', error);
-        alert('Error al rastrear ubicación: ' + error.message);
+        if (error.code === 1) {
+          alert('Por favor permite el acceso a tu ubicación en la configuración del navegador');
+        } else if (error.code === 2) {
+          alert('No se pudo obtener tu ubicación. Verifica que el GPS esté activado');
+        } else if (error.code === 3) {
+          console.log('Timeout de GPS, reintentando...');
+        }
       },
       {
-        enableHighAccuracy: true,
-        timeout: 5000,
-        maximumAge: 0,
+        enableHighAccuracy: true, // Usar GPS de alta precisión
+        timeout: 10000, // Aumentar timeout a 10 segundos
+        maximumAge: 0, // No usar posiciones en caché
       }
     );
   };
 
-  const stopTracking = () => {
+  const stopTracking = async () => {
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
+    
+    // Liberar Wake Lock
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+        console.log('Wake Lock liberado');
+      } catch (err) {
+        console.log('Error liberando Wake Lock:', err);
+      }
+    }
+    
     setIsTracking(false);
+    localStorage.setItem('tracking_active', 'false');
+    
+    // Mostrar resumen del viaje
+    alert(`Rastreo finalizado\n\nDistancia total: ${totalDistance.toFixed(2)} km\nDatos guardados correctamente`);
   };
 
   const calculateDistance = (pos1: Position, pos2: Position): number => {
@@ -219,6 +310,11 @@ export default function TrackerPage() {
     const positions = existingData ? JSON.parse(existingData) : [];
     positions.push(position);
     localStorage.setItem(storageKey, JSON.stringify(positions));
+
+    // Guardar también el estado actual para recuperación
+    localStorage.setItem('tracking_active', isTracking.toString());
+    localStorage.setItem('tracking_distance', totalDistance.toString());
+    localStorage.setItem('tracking_last_update', new Date().toISOString());
   };
 
   const handleLogout = () => {
@@ -249,7 +345,7 @@ export default function TrackerPage() {
 
       {/* Stats Panel */}
       <div className="bg-white border-b border-gray-200 p-4">
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-2 gap-4 mb-3">
           <div className="bg-blue-50 rounded-lg p-3">
             <p className="text-xs text-gray-600 mb-1">Distancia Total</p>
             <p className="text-2xl font-bold text-blue-900">
@@ -263,6 +359,30 @@ export default function TrackerPage() {
             </p>
           </div>
         </div>
+        
+        {/* Indicadores de precisión y estado */}
+        {isTracking && (
+          <div className="grid grid-cols-2 gap-4">
+            <div className={`rounded-lg p-2 ${
+              accuracy < 20 ? 'bg-green-100' : 
+              accuracy < 50 ? 'bg-yellow-100' : 'bg-red-100'
+            }`}>
+              <p className="text-xs text-gray-600">Precisión GPS</p>
+              <p className="text-sm font-bold">
+                ±{accuracy.toFixed(0)}m {
+                  accuracy < 20 ? '🟢 Excelente' : 
+                  accuracy < 50 ? '🟡 Buena' : '🔴 Baja'
+                }
+              </p>
+            </div>
+            <div className="bg-purple-50 rounded-lg p-2">
+              <p className="text-xs text-gray-600">Última actualización</p>
+              <p className="text-sm font-bold">
+                {lastUpdate ? lastUpdate.toLocaleTimeString('es-AR') : '--:--'}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Map */}
@@ -273,31 +393,46 @@ export default function TrackerPage() {
       {/* Control Panel */}
       <div className="bg-white border-t border-gray-200 p-4 shadow-lg">
         {!isTracking ? (
-          <button
-            onClick={startTracking}
-            className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded-lg transition shadow-lg"
-          >
-            <div className="flex items-center justify-center">
-              <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Iniciar Rastreo
-            </div>
-          </button>
+          <div>
+            <button
+              onClick={startTracking}
+              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded-lg transition shadow-lg"
+            >
+              <div className="flex items-center justify-center">
+                <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Iniciar Rastreo
+              </div>
+            </button>
+            <p className="text-xs text-gray-500 text-center mt-2">
+              El rastreo continuará aunque uses otras apps
+            </p>
+          </div>
         ) : (
-          <button
-            onClick={stopTracking}
-            className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-4 px-6 rounded-lg transition shadow-lg"
-          >
-            <div className="flex items-center justify-center">
-              <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-              </svg>
-              Detener Rastreo
+          <div>
+            <div className="bg-green-100 border border-green-400 rounded-lg p-3 mb-3">
+              <p className="text-sm text-green-800 text-center font-semibold">
+                🔴 RASTREANDO EN VIVO
+              </p>
+              <p className="text-xs text-green-700 text-center mt-1">
+                Puedes minimizar la app, el rastreo continúa
+              </p>
             </div>
-          </button>
+            <button
+              onClick={stopTracking}
+              className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-4 px-6 rounded-lg transition shadow-lg"
+            >
+              <div className="flex items-center justify-center">
+                <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+                </svg>
+                Detener Rastreo
+              </div>
+            </button>
+          </div>
         )}
       </div>
     </div>
