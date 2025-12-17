@@ -279,8 +279,33 @@ export default function TrackerPage() {
     setIsTracking(false);
     localStorage.setItem('tracking_active', 'false');
     
-    // Mostrar resumen del viaje
-    alert(`Rastreo finalizado\n\nDistancia total: ${totalDistance.toFixed(2)} km\nDatos guardados correctamente`);
+    // Guardar datos completos del viaje para el resumen
+    const duracionMinutos = path.length > 0 
+      ? Math.round((path[path.length - 1].timestamp - path[0].timestamp) / 60000) 
+      : 0;
+    
+    const velocidades = path.filter(p => p.speed && p.speed > 0).map(p => (p.speed || 0) * 3.6);
+    const velocidadPromedio = velocidades.length > 0 
+      ? velocidades.reduce((a, b) => a + b, 0) / velocidades.length 
+      : 0;
+    const velocidadMaxima = velocidades.length > 0 ? Math.max(...velocidades) : 0;
+    
+    const resumenViaje = {
+      chofer: userName,
+      fecha: Date.now(),
+      horaInicio: path.length > 0 ? path[0].timestamp : Date.now(),
+      horaFin: path.length > 0 ? path[path.length - 1].timestamp : Date.now(),
+      distanciaTotal: totalDistance,
+      duracionTotal: duracionMinutos,
+      velocidadPromedio: velocidadPromedio,
+      velocidadMaxima: velocidadMaxima,
+      posiciones: path,
+    };
+    
+    localStorage.setItem('ultimo_viaje', JSON.stringify(resumenViaje));
+    
+    // Redirigir a la página de resumen
+    router.push('/resumen');
   };
 
   const calculateDistance = (pos1: Position, pos2: Position): number => {
