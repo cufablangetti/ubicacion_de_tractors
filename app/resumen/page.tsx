@@ -2,6 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
+
+// Importar el escáner QR de forma dinámica para evitar SSR
+const Scanner = dynamic(() => import('@yudiel/react-qr-scanner').then(mod => mod.Scanner), {
+  ssr: false,
+});
 
 interface Position {
   lat: number;
@@ -24,6 +30,9 @@ export default function ResumenPage() {
   const [resumenData, setResumenData] = useState<any>(null);
   const [paradas, setParadas] = useState<Parada[]>([]);
   const [showQRScanner, setShowQRScanner] = useState(false);
+  const [scannerError, setScannerError] = useState<string>('');
+  const [enviandoDatos, setEnviandoDatos] = useState(false);
+  const [urlDestino, setUrlDestino] = useState<string>('');
 
   useEffect(() => {
     // Cargar datos del viaje desde localStorage
@@ -129,19 +138,12 @@ export default function ResumenPage() {
   };
 
   const handleEscanearQR = () => {
-    setShowQRScanner(true);
-  };
-
-  const handleVolverATracker = () => {
-    localStorage.removeItem('ultimo_viaje');
-    router.push('/tracker');
-  };
-
-  const handleExportarDatos = () => {
+    // Preparar datos antes de abrir el escáner
     if (!resumenData) return;
 
     const datos = {
       chofer: resumenData.chofer,
+      patente: resumenData.patente || 'Sin patente',
       fecha: resumenData.fecha,
       horaInicio: resumenData.horaInicio,
       horaFin: resumenData.horaFin,
@@ -159,9 +161,93 @@ export default function ResumenPage() {
       ruta: resumenData.posiciones,
     };
 
-    // Preparar para enviar al QR
     localStorage.setItem('datos_para_qr', JSON.stringify(datos));
+    setScannerError('');
     setShowQRScanner(true);
+  };
+
+  const handleVolverATracker = () => {
+    localStorage.removeItem('ultimo_viaje');
+    router.push('/tracker');
+  };
+
+  const handleQRScanned = async (result: string) => {
+    try {
+      console.log('QR escaneado:', result);
+      setUrlDestino(result);
+      
+      // Validar que sea una URL válida
+      const url = new URL(result);
+      
+      // Obtener los datos preparados
+      const datosStr = localStorage.getItem('datos_para_qr');
+      if (!datosStr) {
+        throw new Error('No hay datos para enviar');
+      }
+
+      const datos = JSON.parse(datosStr);
+      
+      // Mostrar confirmación antes de enviar
+      const confirmar = confirm(
+        `¿Enviar datos del viaje a:\n${url.hostname}\n\nDistancia: ${datos.distanciaTotal.toFixed(2)} km\nParadas: ${datos.paradas.length}\n\n¿Continuar?`
+      );
+      
+      if (!confirmar) {
+        setShowQRScanner(false);
+        return;
+      }
+
+      setEnviandoDatos(true);
+
+      // Enviar datos por POST al endpoint del QR
+      const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(datos),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error del servidor: ${response.status}`);
+      }
+
+      const resultado = await response.json();
+      
+      setShowQRScanner(false);
+      setEnviandoDatos(false);
+      
+      alert(`✅ Datos enviados exitosamente!\n\nRespuesta del servidor:\n${JSON.stringify(resultado, null, 2)}`);
+      
+      // Limpiar datos temporales
+      localStorage.removeItem('datos_para_qr');
+      
+    } catch (error: any) {
+      console.error('Error al enviar datos:', error);
+      setEnviandoDatos(false);
+      
+      if (error.message.includes('URL')) {
+        setScannerError('❌ El QR no contiene una URL válida');
+      } else if (error.message.includes('fetch')) {
+        setScannerError('❌ Error de conexión. Verifica tu internet.');
+      } else {
+        setScannerError(`❌ Error: ${error.message}`);
+      }
+    }
+  };
+
+  const handleScanError = (error: any) => {
+    console.error('Error del escáner:', error);
+    
+    if (error.name === 'NotAllowedError') {
+      setScannerError('❌ Permiso de cámara denegado. Por favor, permite el acceso a la cámara.');
+    } else if (error.name === 'NotFoundError') {
+      setScannerError('❌ No se encontró ninguna cámara en el dispositivo.');
+    } else if (error.name === 'NotReadableError') {
+      setScannerError('❌ La cámara está siendo usada por otra aplicación.');
+    } else {
+      setScannerError(`❌ Error: ${error.message || 'Error desconocido'}`);
+    }
   };
 
   if (!resumenData) {
@@ -178,7 +264,16 @@ export default function ResumenPage() {
       <div className="bg-blue-900 text-white p-4 shadow-lg">
         <div className="container mx-auto">
           <h1 className="text-2xl font-bold">📊 Resumen del Viaje</h1>
-          <p className="text-sm text-blue-200">Chofer: {resumenData.chofer}</p>
+          <div className="flex items-center gap-4 mt-2">
+            <p className="text-sm text-blue-200">
+              👤 Chofer: {resumenData.chofer}
+            </p>
+            {resumenData.patente && (
+              <p className="text-sm text-blue-200">
+                🚛 Patente: {resumenData.patente}
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
@@ -197,6 +292,16 @@ export default function ResumenPage() {
                 day: 'numeric',
               })}
             </p>
+            <div className="flex items-center gap-4 mt-2 text-sm">
+              <span className="inline-flex items-center px-3 py-1 rounded-full bg-blue-100 text-blue-800 font-medium">
+                👤 {resumenData.chofer}
+              </span>
+              {resumenData.patente && (
+                <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-100 text-green-800 font-medium">
+                  🚛 {resumenData.patente}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Estadísticas Principales */}
@@ -344,7 +449,7 @@ export default function ResumenPage() {
         <div className="space-y-4">
           {/* Botón de Escanear QR */}
           <button
-            onClick={handleExportarDatos}
+            onClick={handleEscanearQR}
             className="w-full bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white font-bold py-4 px-6 rounded-lg shadow-lg transition-all duration-200 transform hover:scale-105"
           >
             <div className="flex items-center justify-center">
@@ -395,58 +500,191 @@ export default function ResumenPage() {
 
       {/* Modal de Escáner QR */}
       {showQRScanner && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-6">
-            <h3 className="text-xl font-bold mb-4">📷 Escanear Código QR</h3>
-            
-            <div className="bg-gray-100 rounded-lg p-8 mb-4 text-center">
-              <p className="text-gray-600 mb-4">
-                Apunta la cámara al código QR del registro de campo
-              </p>
-              
-              {/* Aquí iría el componente de escáner QR real */}
-              <div className="bg-white border-4 border-dashed border-gray-300 rounded-lg p-12">
-                <svg
-                  className="w-24 h-24 mx-auto text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+        <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-purple-600 to-purple-700 p-4">
+              <div className="flex items-center justify-between text-white">
+                <h3 className="text-xl font-bold flex items-center">
+                  <svg
+                    className="w-6 h-6 mr-2"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
+                    />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
+                    />
+                  </svg>
+                  Escanear Código QR
+                </h3>
+                <button
+                  onClick={() => setShowQRScanner(false)}
+                  className="text-white hover:text-gray-200 transition"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"
-                  />
-                </svg>
-                <p className="text-sm text-gray-500 mt-2">
-                  Escáner QR (en desarrollo)
-                </p>
+                  <svg
+                    className="w-6 h-6"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
               </div>
             </div>
 
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
-              <p className="text-xs text-gray-700">
-                <strong>ℹ️ Próximamente:</strong> Esta funcionalidad permitirá enviar
-                los datos del viaje directamente al sistema de registro de campo mediante QR.
-              </p>
+            {/* Área del Escáner */}
+            <div className="p-4">
+              <div className="bg-gray-900 rounded-lg overflow-hidden mb-4 relative">
+                {enviandoDatos ? (
+                  <div className="aspect-video flex items-center justify-center bg-gray-800">
+                    <div className="text-center text-white">
+                      <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+                      <p className="text-lg font-semibold">Enviando datos...</p>
+                      <p className="text-sm text-gray-300 mt-2">Por favor espera</p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <Scanner
+                      onScan={(result) => {
+                        if (result && result.length > 0) {
+                          handleQRScanned(result[0].rawValue);
+                        }
+                      }}
+                      onError={handleScanError}
+                      constraints={{
+                        facingMode: 'environment', // Usar cámara trasera en móviles
+                      }}
+                      components={{
+                        torch: true, // Habilitar linterna si está disponible
+                        finder: true,
+                      }}
+                      styles={{
+                        container: {
+                          width: '100%',
+                          aspectRatio: '16/9',
+                        },
+                      }}
+                    />
+                    
+                    {/* Overlay de guía */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      <div className="h-full w-full flex items-center justify-center">
+                        <div className="border-4 border-white rounded-lg w-48 h-48 shadow-lg animate-pulse"></div>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Instrucciones */}
+              <div className="bg-blue-50 border-l-4 border-blue-500 p-3 mb-4">
+                <div className="flex">
+                  <div className="flex-shrink-0">
+                    <svg
+                      className="h-5 w-5 text-blue-500"
+                      fill="currentColor"
+                      viewBox="0 0 20 20"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  </div>
+                  <div className="ml-3">
+                    <p className="text-sm text-blue-700">
+                      <strong>Instrucciones:</strong>
+                    </p>
+                    <ul className="text-xs text-blue-600 mt-1 list-disc list-inside">
+                      <li>Coloca el QR dentro del recuadro blanco</li>
+                      <li>Mantén la cámara estable y enfocada</li>
+                      <li>El escaneo es automático</li>
+                      <li>El QR debe contener la URL del servidor</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              {/* Errores */}
+              {scannerError && (
+                <div className="bg-red-50 border-l-4 border-red-500 p-3 mb-4">
+                  <div className="flex">
+                    <div className="flex-shrink-0">
+                      <svg
+                        className="h-5 w-5 text-red-500"
+                        fill="currentColor"
+                        viewBox="0 0 20 20"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                    </div>
+                    <div className="ml-3">
+                      <p className="text-sm text-red-700">{scannerError}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* URL Detectada */}
+              {urlDestino && (
+                <div className="bg-green-50 border-l-4 border-green-500 p-3 mb-4">
+                  <p className="text-xs text-green-700">
+                    <strong>✅ URL detectada:</strong>
+                  </p>
+                  <p className="text-xs text-green-600 font-mono mt-1 break-all">
+                    {urlDestino}
+                  </p>
+                </div>
+              )}
+
+              {/* Información adicional */}
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-600">
+                  <strong>📊 Datos a enviar:</strong>
+                </p>
+                <ul className="text-xs text-gray-500 mt-1 space-y-1">
+                  <li>• Distancia total: {resumenData?.distanciaTotal.toFixed(2)} km</li>
+                  <li>• Duración: {formatearDuracion(resumenData?.duracionTotal || 0)}</li>
+                  <li>• Paradas detectadas: {paradas.length}</li>
+                  <li>• Puntos GPS: {resumenData?.posiciones.length || 0}</li>
+                </ul>
+              </div>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowQRScanner(false)}
-                className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-3 px-4 rounded-lg transition"
-              >
-                Cancelar
-              </button>
+            {/* Footer */}
+            <div className="bg-gray-100 p-4 border-t">
               <button
                 onClick={() => {
-                  alert('Datos preparados para enviar. En producción, esto enviará la información al sistema de campo.');
                   setShowQRScanner(false);
+                  setScannerError('');
+                  setUrlDestino('');
                 }}
-                className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 px-4 rounded-lg transition"
+                className="w-full bg-gray-600 hover:bg-gray-700 text-white font-semibold py-3 px-4 rounded-lg transition"
+                disabled={enviandoDatos}
               >
-                Enviar Datos
+                {enviandoDatos ? 'Enviando...' : 'Cancelar'}
               </button>
             </div>
           </div>

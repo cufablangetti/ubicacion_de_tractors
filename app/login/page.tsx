@@ -11,6 +11,7 @@ function LoginForm() {
   const [formData, setFormData] = useState({
     userId: '',
     password: '',
+    patente: '',
   });
   const [error, setError] = useState('');
 
@@ -24,11 +25,22 @@ function LoginForm() {
       return;
     }
 
+    // Validar patente solo para choferes
+    if (role === 'driver' && !formData.patente) {
+      setError('Por favor ingrese la patente del vehículo');
+      return;
+    }
+
     // Para demo: cualquier contraseña funciona
     // En producción: verificar contra base de datos
     localStorage.setItem('userId', formData.userId);
     localStorage.setItem('userRole', role);
     localStorage.setItem('userName', formData.userId);
+    
+    // Guardar patente si es chofer
+    if (role === 'driver' && formData.patente) {
+      localStorage.setItem('vehiclePatente', formData.patente.toUpperCase());
+    }
 
     if (role === 'admin') {
       router.push('/admin');
@@ -83,6 +95,27 @@ function LoginForm() {
               autoComplete="current-password"
             />
           </div>
+
+          {role === 'driver' && (
+            <div>
+              <label htmlFor="patente" className="block text-sm font-medium text-gray-700 mb-2">
+                Patente del Vehículo
+              </label>
+              <input
+                type="text"
+                id="patente"
+                value={formData.patente}
+                onChange={(e) => setFormData({ ...formData, patente: e.target.value.toUpperCase() })}
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent uppercase"
+                placeholder="Ej: ABC123 o AB123CD"
+                maxLength={8}
+                autoComplete="off"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Ingrese la patente del camión que conducirá
+              </p>
+            </div>
+          )}
 
           <button
             type="submit"

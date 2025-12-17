@@ -23,6 +23,7 @@ export default function TrackerPage() {
   const [totalDistance, setTotalDistance] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState(0);
   const [userName, setUserName] = useState('');
+  const [vehiclePatente, setVehiclePatente] = useState('');
   const [accuracy, setAccuracy] = useState(0);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const watchIdRef = useRef<number | null>(null);
@@ -32,6 +33,7 @@ export default function TrackerPage() {
     const userId = localStorage.getItem('userId');
     const userRole = localStorage.getItem('userRole');
     const name = localStorage.getItem('userName');
+    const patente = localStorage.getItem('vehiclePatente');
 
     if (!userId || userRole !== 'driver') {
       router.push('/login?role=driver');
@@ -39,6 +41,7 @@ export default function TrackerPage() {
     }
 
     setUserName(name || userId);
+    setVehiclePatente(patente || 'Sin patente');
     initializeMap();
 
     // Solicitar permisos de notificación para alertas en segundo plano
@@ -292,6 +295,7 @@ export default function TrackerPage() {
     
     const resumenViaje = {
       chofer: userName,
+      patente: vehiclePatente,
       fecha: Date.now(),
       horaInicio: path.length > 0 ? path[0].timestamp : Date.now(),
       horaFin: path.length > 0 ? path[path.length - 1].timestamp : Date.now(),
@@ -355,9 +359,16 @@ export default function TrackerPage() {
       {/* Header */}
       <div className="bg-blue-900 text-white p-4 shadow-lg">
         <div className="flex justify-between items-center">
-          <div>
+          <div className="flex-1">
             <h1 className="text-xl font-bold">DIBIAGI GPS</h1>
-            <p className="text-sm text-blue-200">Chofer: {userName}</p>
+            <div className="flex items-center gap-3 mt-1">
+              <p className="text-sm text-blue-200">
+                👤 {userName}
+              </p>
+              <p className="text-sm text-blue-200">
+                🚛 {vehiclePatente}
+              </p>
+            </div>
           </div>
           <button
             onClick={handleLogout}
