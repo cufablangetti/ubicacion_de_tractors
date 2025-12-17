@@ -49,7 +49,18 @@ export default function TrackerPage() {
       Notification.requestPermission();
     }
 
-    // Detectar cuando la app va a segundo plano
+    return () => {
+      if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release();
+      }
+    };
+  }, [router]);
+
+  // Efecto separado para notificaciones de segundo plano
+  useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden' && isTracking) {
         // Mostrar notificación persistente
@@ -68,15 +79,9 @@ export default function TrackerPage() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      if (watchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(watchIdRef.current);
-      }
-      if (wakeLockRef.current) {
-        wakeLockRef.current.release();
-      }
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [router, isTracking]);
+  }, [isTracking]);
 
   const initializeMap = async () => {
     if (!mapRef.current) return;
@@ -217,32 +222,42 @@ export default function TrackerPage() {
             
             // Solo agregar distancia si es mayor a 5 metros (evitar ruido GPS)
             if (distance > 0.005) { // 0.005 km = 5 metros
-              setTotalDistance((prev) => prev + distance);
-            }
-          }
-
-          // Actualizar polyline
-          if (map && updatedPath.length > 1) {
-            if (polyline) {
-              polyline.setPath(updatedPath.map(p => ({ lat: p.lat, lng: p.lng })));
-            } else {
-              const newPolyline = new google.maps.Polyline({
-                path: updatedPath.map(p => ({ lat: p.lat, lng: p.lng })),
-                geodesic: true,
-                strokeColor: '#FF0000',
-                strokeOpacity: 1.0,
-                strokeWeight: 4,
-                map: map,
+              setTotalDistance((prev) => {
+                const newTotal = prev + distance;
+                console.log('📍 Nueva posición - Distancia acumulada:', newTotal.toFixed(2), 'km');
+                return newTotal;
               });
-              setPolyline(newPolyline);
             }
           }
-
-          // Guardar en localStorage para persistencia
-          savePositionToStorage(newPos);
 
           return updatedPath;
         });
+
+        // Actualizar polyline fuera del setState para evitar problemas de sincronización
+        if (map) {
+          setPath((currentPath) => {
+            if (currentPath.length > 1) {
+              if (polyline) {
+                polyline.setPath(currentPath.map(p => ({ lat: p.lat, lng: p.lng })));
+              } else {
+                const newPolyline = new google.maps.Polyline({
+                  path: currentPath.map(p => ({ lat: p.lat, lng: p.lng })),
+                  geodesic: true,
+                  strokeColor: '#FF0000',
+                  strokeOpacity: 1.0,
+                  strokeWeight: 4,
+                  map: map,
+                });
+                setPolyline(newPolyline);
+                console.log('🗺️ Polyline creado con', currentPath.length, 'puntos');
+              }
+            }
+            return currentPath;
+          });
+        }
+
+        // Guardar en localStorage para persistencia
+        savePositionToStorage(newPos);
       },
       (error) => {
         console.error('Error de seguimiento:', error);
@@ -383,16 +398,26 @@ export default function TrackerPage() {
       <div className="bg-white border-b border-gray-200 p-4">
         <div className="grid grid-cols-2 gap-4 mb-3">
           <div className="bg-blue-50 rounded-lg p-3">
-            <p className="text-xs text-gray-600 mb-1">Distancia Total</p>
+            <p className="text-xs text-gray-600 mb-1">📏 Distancia Total</p>
             <p className="text-2xl font-bold text-blue-900">
               {totalDistance.toFixed(2)} km
             </p>
+            {isTracking && (
+              <p className="text-xs text-blue-600 mt-1">
+                {path.length} puntos GPS
+              </p>
+            )}
           </div>
           <div className="bg-green-50 rounded-lg p-3">
-            <p className="text-xs text-gray-600 mb-1">Velocidad Actual</p>
+            <p className="text-xs text-gray-600 mb-1">⚡ Velocidad Actual</p>
             <p className="text-2xl font-bold text-green-900">
               {currentSpeed.toFixed(0)} km/h
             </p>
+            {isTracking && (
+              <p className="text-xs text-green-600 mt-1">
+                En tiempo real
+              </p>
+            )}
           </div>
         </div>
         
@@ -403,7 +428,7 @@ export default function TrackerPage() {
               accuracy < 20 ? 'bg-green-100' : 
               accuracy < 50 ? 'bg-yellow-100' : 'bg-red-100'
             }`}>
-              <p className="text-xs text-gray-600">Precisión GPS</p>
+              <p className="text-xs text-gray-600">🎯 Precisión GPS</p>
               <p className="text-sm font-bold">
                 ±{accuracy.toFixed(0)}m {
                   accuracy < 20 ? '🟢 Excelente' : 
@@ -412,11 +437,19 @@ export default function TrackerPage() {
               </p>
             </div>
             <div className="bg-purple-50 rounded-lg p-2">
-              <p className="text-xs text-gray-600">Última actualización</p>
+              <p className="text-xs text-gray-600">🕐 Última actualización</p>
               <p className="text-sm font-bold">
                 {lastUpdate ? lastUpdate.toLocaleTimeString('es-AR') : '--:--'}
               </p>
             </div>
+          </div>
+        )}
+
+        {!isTracking && (
+          <div className="bg-gray-100 rounded-lg p-3 text-center">
+            <p className="text-sm text-gray-600">
+              Presiona "Iniciar Rastreo" para comenzar a registrar tu recorrido
+            </p>
           </div>
         )}
       </div>
