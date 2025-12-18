@@ -32,6 +32,7 @@ export default function TrackerPage() {
   const consecutiveStillCountRef = useRef<number>(0); // Contador de posiciones "quietas"
   const totalDistanceRef = useRef<number>(0); // Distancia acumulada en ref para actualización instantánea
   const speedHistoryRef = useRef<number[]>([]); // Últimas velocidades para promedio
+  const keepAliveIntervalRef = useRef<NodeJS.Timeout | null>(null); // Intervalo para mantener GPS activo
 
   useEffect(() => {
     const userId = localStorage.getItem('userId');
@@ -57,68 +58,136 @@ export default function TrackerPage() {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
+      if (keepAliveIntervalRef.current !== null) {
+        clearInterval(keepAliveIntervalRef.current);
+      }
       if (wakeLockRef.current) {
         wakeLockRef.current.release();
       }
     };
   }, [router]);
 
-  // Efecto separado para mantener rastreo en segundo plano
+  // Efecto separado para mantener rastreo en segundo plano y recuperar datos
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden' && isTracking) {
         console.log('🔄 App en segundo plano - GPS continúa activo');
         
-        // Guardar timestamp cuando va a background
+        // Guardar timestamp y última posición conocida cuando va a background
         localStorage.setItem('background_timestamp', Date.now().toString());
+        if (path.length > 0) {
+          const lastPos = path[path.length - 1];
+          localStorage.setItem('background_last_position', JSON.stringify(lastPos));
+          console.log('💾 Guardada última posición antes de background:', lastPos.lat.toFixed(6), lastPos.lng.toFixed(6));
+        }
         
         // Mostrar notificación silenciosa
         if ('Notification' in window && Notification.permission === 'granted') {
           new Notification('DIBIAGI GPS Activo', {
             body: '📍 El rastreo GPS continúa registrando tu recorrido',
-            icon: '/icon-192x192.png',
-            badge: '/icon-192x192.png',
+            icon: '/icon.svg',
+            badge: '/icon.svg',
             tag: 'gps-tracking',
             requireInteraction: false,
             silent: true,
           });
         }
       } else if (document.visibilityState === 'visible' && isTracking) {
-        console.log('✅ App volvió al primer plano - verificando continuidad');
+        console.log('✅ App volvió al primer plano - recuperando datos');
         
         // Verificar tiempo en background
         const backgroundTime = localStorage.getItem('background_timestamp');
+        const backgroundLastPos = localStorage.getItem('background_last_position');
+        
         if (backgroundTime) {
           const timeInBackground = Date.now() - parseInt(backgroundTime);
           const minutesInBackground = Math.floor(timeInBackground / 60000);
           
-          if (minutesInBackground > 0) {
-            console.log(`⏱️ Estuvo ${minutesInBackground} minutos en segundo plano`);
-            
-            // Mostrar notificación de continuidad
-            if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification('GPS Continuo', {
-                body: `✅ Rastreo registrado durante ${minutesInBackground} min en segundo plano`,
-                icon: '/icon-192x192.png',
-                tag: 'gps-resume',
-              });
+          console.log(`⏱️ Estuvo ${minutesInBackground} minutos ${Math.floor((timeInBackground % 60000) / 1000)} segundos en segundo plano`);
+          
+          // Recuperar todas las posiciones guardadas durante el background
+          const userId = localStorage.getItem('userId');
+          const storageKey = `route_${userId}_${new Date().toISOString().split('T')[0]}`;
+          const storedData = localStorage.getItem(storageKey);
+          
+          if (storedData && backgroundLastPos) {
+            try {
+              const allPositions = JSON.parse(storedData) as Position[];
+              const lastKnownPos = JSON.parse(backgroundLastPos) as Position;
+              
+              // Filtrar posiciones nuevas (posteriores a la última conocida)
+              const newPositions = allPositions.filter(p => p.timestamp > lastKnownPos.timestamp);
+              
+              if (newPositions.length > 0) {
+                console.log(`📦 Recuperando ${newPositions.length} posiciones del background`);
+                
+                // Agregar las posiciones recuperadas al path
+                setPath(prevPath => {
+                  const mergedPath = [...prevPath];
+                  
+                  newPositions.forEach(newPos => {
+                    // Verificar que no esté duplicada
+                    const isDuplicate = mergedPath.some(p => 
+                      Math.abs(p.timestamp - newPos.timestamp) < 1000
+                    );
+                    
+                    if (!isDuplicate) {
+                      // Calcular distancia si hay posición previa
+                      if (mergedPath.length > 0) {
+                        const lastPos = mergedPath[mergedPath.length - 1];
+                        const distance = calculateDistance(lastPos, newPos);
+                        const distanceMeters = distance * 1000;
+                        
+                        // Aplicar filtros básicos
+                        if (distanceMeters >= 20 && newPos.accuracy && newPos.accuracy < 5) {
+                          mergedPath.push(newPos);
+                          totalDistanceRef.current += distance;
+                          console.log(`✅ Recuperado: +${distanceMeters.toFixed(1)}m`);
+                        }
+                      } else {
+                        mergedPath.push(newPos);
+                      }
+                    }
+                  });
+                  
+                  return mergedPath;
+                });
+                
+                // Actualizar distancia total
+                setTotalDistance(totalDistanceRef.current);
+                
+                // Mostrar notificación de recuperación exitosa
+                if ('Notification' in window && Notification.permission === 'granted') {
+                  new Notification('GPS Recuperado', {
+                    body: `✅ ${newPositions.length} puntos GPS recuperados del segundo plano`,
+                    icon: '/icon.svg',
+                    tag: 'gps-resume',
+                  });
+                }
+              }
+            } catch (error) {
+              console.error('❌ Error recuperando datos del background:', error);
             }
           }
           
           localStorage.removeItem('background_timestamp');
+          localStorage.removeItem('background_last_position');
         }
         
-        // Forzar actualización del mapa y polyline con todas las posiciones
-        if (path.length > 0 && map) {
-          const lastPos = path[path.length - 1];
-          map.panTo({ lat: lastPos.lat, lng: lastPos.lng });
-          
-          // Actualizar polyline con todos los puntos
-          if (polylineRef.current && path.length > 1) {
-            polylineRef.current.setPath(path.map(p => ({ lat: p.lat, lng: p.lng })));
-            console.log('🗺️ Polyline actualizado con', path.length, 'puntos después de volver');
+        // Forzar actualización del mapa y polyline con todas las posiciones (después de recuperar)
+        setTimeout(() => {
+          if (path.length > 0 && map) {
+            const lastPos = path[path.length - 1];
+            map.panTo({ lat: lastPos.lat, lng: lastPos.lng });
+            
+            // Actualizar polyline con todos los puntos
+            if (polylineRef.current && path.length > 1) {
+              const allCoords = path.map(p => ({ lat: p.lat, lng: p.lng }));
+              polylineRef.current.setPath(allCoords);
+              console.log('🗺️ Polyline actualizado con', path.length, 'puntos (incluye recuperados)');
+            }
           }
-        }
+        }, 500); // Pequeño delay para asegurar que el estado se actualice
       }
     };
 
@@ -220,6 +289,18 @@ export default function TrackerPage() {
     consecutiveStillCountRef.current = 0; // Resetear contador
     speedHistoryRef.current = []; // Limpiar histórico de velocidades
 
+    // Sistema Keep-Alive: mantener GPS activo incluso en background
+    keepAliveIntervalRef.current = setInterval(() => {
+      if (watchIdRef.current !== null) {
+        // Ping silencioso para mantener el watchPosition activo
+        const status = document.visibilityState === 'hidden' ? '🌙 BACKGROUND' : '☀️ FOREGROUND';
+        console.log(`💓 GPS Keep-Alive [${status}] - WatchID: ${watchIdRef.current}`);
+        
+        // Guardar heartbeat timestamp
+        localStorage.setItem('gps_heartbeat', Date.now().toString());
+      }
+    }, 10000); // Cada 10 segundos
+
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
         // FILTRO 1: Precisión EXTREMA - Solo GPS premium (< 5 metros = ±0.5m error real)
@@ -264,7 +345,10 @@ export default function TrackerPage() {
         setAccuracy(position.coords.accuracy);
         setLastUpdate(new Date());
 
-        console.log(`📍 GPS PREMIUM: ${newPos.lat.toFixed(7)}, ${newPos.lng.toFixed(7)} | Precisión: ${position.coords.accuracy.toFixed(2)}m (±0.5m) | Velocidad: ${smoothSpeed.toFixed(2)} km/h`);
+        console.log(`📍 GPS PREMIUM: ${newPos.lat.toFixed(7)}, ${newPos.lng.toFixed(7)} | Precisión: ${position.coords.accuracy.toFixed(2)}m (±0.5m) | Velocidad: ${smoothSpeed.toFixed(2)} km/h | Visibilidad: ${document.visibilityState}`);
+
+        // GUARDAR INMEDIATAMENTE en localStorage (antes de filtros) para recuperación en background
+        savePositionToStorage(newPos);
 
         // Actualizar marcador con color según precisión EXTREMA (actualización instantánea)
         if (marker) {
@@ -403,9 +487,6 @@ export default function TrackerPage() {
 
           return updatedPath;
         });
-
-        // Guardar en localStorage para persistencia
-        savePositionToStorage(newPos);
       },
       (error) => {
         console.error('❌ Error GPS:', error.message, '(code:', error.code, ')');
@@ -431,6 +512,13 @@ export default function TrackerPage() {
       watchIdRef.current = null;
     }
     
+    // Detener keep-alive interval
+    if (keepAliveIntervalRef.current !== null) {
+      clearInterval(keepAliveIntervalRef.current);
+      keepAliveIntervalRef.current = null;
+      console.log('Keep-Alive detenido');
+    }
+    
     // Liberar Wake Lock
     if (wakeLockRef.current) {
       try {
@@ -444,6 +532,7 @@ export default function TrackerPage() {
     
     setIsTracking(false);
     localStorage.setItem('tracking_active', 'false');
+    localStorage.removeItem('gps_heartbeat');
     
     // Guardar datos completos del viaje para el resumen
     const duracionMinutos = path.length > 0 
@@ -497,16 +586,34 @@ export default function TrackerPage() {
     const userId = localStorage.getItem('userId');
     if (!userId) return;
 
-    const storageKey = `route_${userId}_${new Date().toISOString().split('T')[0]}`;
-    const existingData = localStorage.getItem(storageKey);
-    const positions = existingData ? JSON.parse(existingData) : [];
-    positions.push(position);
-    localStorage.setItem(storageKey, JSON.stringify(positions));
+    try {
+      const storageKey = `route_${userId}_${new Date().toISOString().split('T')[0]}`;
+      const existingData = localStorage.getItem(storageKey);
+      const positions = existingData ? JSON.parse(existingData) : [];
+      
+      // Agregar marca de tiempo de guardado y estado de visibilidad
+      const enrichedPosition = {
+        ...position,
+        savedAt: Date.now(),
+        wasBackground: document.visibilityState === 'hidden',
+      };
+      
+      positions.push(enrichedPosition);
+      localStorage.setItem(storageKey, JSON.stringify(positions));
 
-    // Guardar también el estado actual para recuperación
-    localStorage.setItem('tracking_active', isTracking.toString());
-    localStorage.setItem('tracking_distance', totalDistance.toString());
-    localStorage.setItem('tracking_last_update', new Date().toISOString());
+      // Guardar también el estado actual para recuperación
+      localStorage.setItem('tracking_active', isTracking.toString());
+      localStorage.setItem('tracking_distance', totalDistanceRef.current.toString());
+      localStorage.setItem('tracking_last_update', new Date().toISOString());
+      localStorage.setItem('tracking_path_length', path.length.toString());
+      
+      // Log periódico (cada 10 posiciones)
+      if (positions.length % 10 === 0) {
+        console.log(`💾 ${positions.length} posiciones guardadas (${document.visibilityState})`);
+      }
+    } catch (error) {
+      console.error('❌ Error guardando posición:', error);
+    }
   };
 
   const handleLogout = () => {
