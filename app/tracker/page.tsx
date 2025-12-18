@@ -214,9 +214,9 @@ export default function TrackerPage() {
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        // Filtrar posiciones con baja precisión (accuracy > 20 metros para mayor precisión)
-        if (position.coords.accuracy > 20) {
-          console.log('⚠️ Precisión baja ignorada:', position.coords.accuracy.toFixed(1), 'm');
+        // FILTRO 1: Precisión mínima requerida (solo < 15 metros para evitar ruido)
+        if (position.coords.accuracy > 15) {
+          console.log('⚠️ Precisión insuficiente ignorada:', position.coords.accuracy.toFixed(1), 'm');
           return;
         }
 
@@ -260,15 +260,30 @@ export default function TrackerPage() {
         setPath((prevPath) => {
           let updatedPath = [...prevPath];
 
-          // Detectar gaps (saltos grandes por segundo plano) y manejarlos
+          // Detectar gaps y filtrar ruido GPS
           if (prevPath.length > 0) {
             const lastPos = prevPath[prevPath.length - 1];
             const distance = calculateDistance(lastPos, newPos);
             const timeGap = newPos.timestamp - lastPos.timestamp; // milisegundos
+            const distanceMeters = distance * 1000; // Convertir a metros
+            
+            // FILTRO 2: Ignorar micro-movimientos (ruido GPS cuando estás quieto)
+            // Si la distancia es < 5 metros Y la velocidad es casi 0, es ruido
+            if (distanceMeters < 5 && speedKmh < 1.5) {
+              console.log(`🔇 RUIDO ignorado: ${distanceMeters.toFixed(1)}m, velocidad ${speedKmh.toFixed(1)} km/h`);
+              // Actualizar solo el marcador (no agregar a la ruta)
+              return prevPath;
+            }
+            
+            // FILTRO 3: Movimiento muy lento - solo registrar si supera 8 metros
+            if (distanceMeters < 8 && speedKmh < 3) {
+              console.log(`⏸️ Movimiento lento ignorado: ${distanceMeters.toFixed(1)}m`);
+              return prevPath;
+            }
             
             // Si hay un gap grande (> 100m o > 30s), interpolar puntos
             if (distance > 0.1 || timeGap > 30000) {
-              console.log(`⚠️ GAP DETECTADO: ${(distance * 1000).toFixed(0)}m en ${(timeGap / 1000).toFixed(0)}s`);
+              console.log(`⚠️ GAP DETECTADO: ${distanceMeters.toFixed(0)}m en ${(timeGap / 1000).toFixed(0)}s`);
               
               // Interpolar puntos intermedios para suavizar la ruta
               const numPoints = Math.min(Math.floor(distance / 0.05), 10); // Máx 10 puntos
@@ -289,21 +304,20 @@ export default function TrackerPage() {
               }
             }
             
-            // Agregar la nueva posición real
+            // Agregar la nueva posición real (solo si pasó los filtros)
             updatedPath.push(newPos);
             
-            // Calcular distancia solo si es > 2 metros
-            if (distance > 0.002) {
-              setTotalDistance((prev) => {
-                const newTotal = prev + distance;
-                const gapTag = (distance > 0.1 || timeGap > 30000) ? ' [INTERPOLADO]' : '';
-                console.log('📏 Distancia:', newTotal.toFixed(3), 'km (+', (distance * 1000).toFixed(1), 'm)' + gapTag);
-                return newTotal;
-              });
-            }
+            // Calcular y actualizar distancia
+            setTotalDistance((prev) => {
+              const newTotal = prev + distance;
+              const gapTag = (distance > 0.1 || timeGap > 30000) ? ' [INTERPOLADO]' : '';
+              console.log('✅ Distancia:', newTotal.toFixed(3), 'km (+', distanceMeters.toFixed(1), 'm)' + gapTag);
+              return newTotal;
+            });
           } else {
             // Primera posición
             updatedPath.push(newPos);
+            console.log('🎯 Primera posición registrada');
           }
 
           // Actualizar polyline inmediatamente
