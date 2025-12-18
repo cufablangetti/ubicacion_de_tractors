@@ -218,9 +218,9 @@ export default function TrackerPage() {
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        // FILTRO 1: Precisión ULTRA ESTRICTA - Solo acepta GPS excelente (< 10 metros)
-        if (position.coords.accuracy > 10) {
-          console.log('❌ Precisión insuficiente:', position.coords.accuracy.toFixed(1), 'm (requiere < 10m)');
+        // FILTRO 1: Precisión EXTREMA - Solo GPS premium (< 5 metros = ±0.5m error real)
+        if (position.coords.accuracy > 5) {
+          console.log('❌ GPS insuficiente:', position.coords.accuracy.toFixed(1), 'm (REQUIERE < 5m para ±0.5m precisión)');
           return;
         }
 
@@ -238,16 +238,17 @@ export default function TrackerPage() {
         setAccuracy(position.coords.accuracy);
         setLastUpdate(new Date());
 
-        console.log(`📍 GPS: ${newPos.lat.toFixed(6)}, ${newPos.lng.toFixed(6)} | Precisión: ${position.coords.accuracy.toFixed(1)}m | Velocidad: ${speedKmh.toFixed(1)} km/h`);
+        console.log(`📍 GPS PREMIUM: ${newPos.lat.toFixed(7)}, ${newPos.lng.toFixed(7)} | Precisión: ${position.coords.accuracy.toFixed(2)}m (±0.5m) | Velocidad: ${speedKmh.toFixed(2)} km/h`);
 
-        // Actualizar marcador con color según precisión
+        // Actualizar marcador con color según precisión EXTREMA
         if (marker) {
           marker.setPosition({ lat: newPos.lat, lng: newPos.lng });
-          const color = position.coords.accuracy < 10 ? '#00FF00' : 
-                       position.coords.accuracy < 20 ? '#FFD700' : '#FF0000';
+          // Verde solo para < 5m (precisión premium), resto rechazado
+          const color = position.coords.accuracy < 3 ? '#00FF00' : 
+                       position.coords.accuracy < 5 ? '#90EE90' : '#FFFF00';
           marker.setIcon({
             path: google.maps.SymbolPath.CIRCLE,
-            scale: 10,
+            scale: 12, // Más grande para ver mejor
             fillColor: color,
             fillOpacity: 1,
             strokeColor: '#ffffff',
@@ -271,32 +272,42 @@ export default function TrackerPage() {
             const timeGap = newPos.timestamp - lastPos.timestamp; // milisegundos
             const distanceMeters = distance * 1000; // Convertir a metros
             
-            // FILTRO 2: ULTRA ESTRICTO - Ignorar TODO movimiento menor a 10 metros
-            if (distanceMeters < 10) {
+            // FILTRO 2: EXTREMO - Movimiento mínimo 20 metros para precisión ±0.5m
+            if (distanceMeters < 20) {
               consecutiveStillCountRef.current++;
-              console.log(`🔇 RUIDO ignorado: ${distanceMeters.toFixed(1)}m (quieto x${consecutiveStillCountRef.current})`);
+              console.log(`🔇 Micro-movimiento ignorado: ${distanceMeters.toFixed(2)}m < 20m (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 3: Velocidad - Debe estar moviéndose de verdad (> 2 km/h)
-            if (speedKmh < 2) {
+            // FILTRO 3: Velocidad mínima - Debe moverse rápido (> 3 km/h)
+            if (speedKmh < 3) {
               consecutiveStillCountRef.current++;
-              console.log(`🐌 Velocidad baja: ${speedKmh.toFixed(1)} km/h (quieto x${consecutiveStillCountRef.current})`);
+              console.log(`🐌 Demasiado lento: ${speedKmh.toFixed(1)} km/h < 3 km/h (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 4: Combinado - Si distancia < 15m Y velocidad < 5 km/h = probablemente ruido
-            if (distanceMeters < 15 && speedKmh < 5) {
+            // FILTRO 4: Doble verificación - Distancia < 30m Y velocidad < 8 km/h
+            if (distanceMeters < 30 && speedKmh < 8) {
               consecutiveStillCountRef.current++;
-              console.log(`⚠️ Movimiento dudoso ignorado: ${distanceMeters.toFixed(1)}m a ${speedKmh.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
+              console.log(`⚠️ Movimiento inseguro: ${distanceMeters.toFixed(2)}m a ${speedKmh.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 5: Modo "BLOQUEADO" - Si ha estado quieto por mucho tiempo (>20 intentos), 
-            // requiere movimiento MUY significativo (>20m) para desbloquearse
-            if (consecutiveStillCountRef.current > 20 && distanceMeters < 20) {
-              console.log(`🔒 BLOQUEADO: ${distanceMeters.toFixed(1)}m insuficiente (requiere >20m tras ${consecutiveStillCountRef.current} quietos)`);
+            // FILTRO 5: Modo BLOQUEADO EXTREMO - Si quieto >15 intentos, requiere >30m
+            if (consecutiveStillCountRef.current > 15 && distanceMeters < 30) {
+              console.log(`🔒 BLOQUEADO: ${distanceMeters.toFixed(2)}m < 30m requeridos (tras ${consecutiveStillCountRef.current} rechazos)`);
               return prevPath;
+            }
+            
+            // FILTRO 6: Verificación de aceleración súbita (posible error GPS)
+            if (distanceMeters > 100 && timeGap < 5000) {
+              // Movimiento > 100m en < 5 segundos = > 72 km/h = probablemente error
+              const speedCalc = (distanceMeters / 1000) / (timeGap / 3600000);
+              if (speedCalc > 60) {
+                consecutiveStillCountRef.current++;
+                console.log(`⚡ Salto GPS ignorado: ${distanceMeters.toFixed(0)}m en ${(timeGap/1000).toFixed(1)}s = ${speedCalc.toFixed(0)} km/h (x${consecutiveStillCountRef.current})`);
+                return prevPath;
+              }
             }
             
             // Si llegamos aquí, hay movimiento REAL - resetear contador
