@@ -30,6 +30,8 @@ export default function TrackerPage() {
   const wakeLockRef = useRef<any>(null);
   const positionBufferRef = useRef<Position[]>([]); // Buffer para promediar posiciones
   const consecutiveStillCountRef = useRef<number>(0); // Contador de posiciones "quietas"
+  const totalDistanceRef = useRef<number>(0); // Distancia acumulada en ref para actualización instantánea
+  const speedHistoryRef = useRef<number[]>([]); // Últimas velocidades para promedio
 
   useEffect(() => {
     const userId = localStorage.getItem('userId');
@@ -213,8 +215,10 @@ export default function TrackerPage() {
     setIsTracking(true);
     setPath([]);
     setTotalDistance(0);
+    totalDistanceRef.current = 0; // Resetear distancia en ref
     positionBufferRef.current = []; // Limpiar buffer
     consecutiveStillCountRef.current = 0; // Resetear contador
+    speedHistoryRef.current = []; // Limpiar histórico de velocidades
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
@@ -232,15 +236,37 @@ export default function TrackerPage() {
           accuracy: position.coords.accuracy,
         };
 
+        // Calcular velocidad instantánea (usar speed del GPS si está disponible)
+        let instantSpeed = 0;
+        if (position.coords.speed && position.coords.speed > 0) {
+          instantSpeed = position.coords.speed * 3.6; // m/s a km/h
+        } else if (path.length > 0) {
+          // Si no hay speed, calcular manualmente desde última posición
+          const lastPos = path[path.length - 1];
+          const distKm = calculateDistance(lastPos, newPos);
+          const timeHours = (position.timestamp - lastPos.timestamp) / 3600000;
+          if (timeHours > 0) {
+            instantSpeed = distKm / timeHours;
+          }
+        }
+
+        // Mantener histórico de velocidades para suavizar (últimos 3 valores)
+        speedHistoryRef.current.push(instantSpeed);
+        if (speedHistoryRef.current.length > 3) {
+          speedHistoryRef.current.shift();
+        }
+        
+        // Velocidad suavizada (promedio de últimos 3 valores)
+        const smoothSpeed = speedHistoryRef.current.reduce((a, b) => a + b, 0) / speedHistoryRef.current.length;
+        
         // Actualizar estados inmediatamente
-        const speedKmh = position.coords.speed ? position.coords.speed * 3.6 : 0;
-        setCurrentSpeed(speedKmh);
+        setCurrentSpeed(smoothSpeed);
         setAccuracy(position.coords.accuracy);
         setLastUpdate(new Date());
 
-        console.log(`📍 GPS PREMIUM: ${newPos.lat.toFixed(7)}, ${newPos.lng.toFixed(7)} | Precisión: ${position.coords.accuracy.toFixed(2)}m (±0.5m) | Velocidad: ${speedKmh.toFixed(2)} km/h`);
+        console.log(`📍 GPS PREMIUM: ${newPos.lat.toFixed(7)}, ${newPos.lng.toFixed(7)} | Precisión: ${position.coords.accuracy.toFixed(2)}m (±0.5m) | Velocidad: ${smoothSpeed.toFixed(2)} km/h`);
 
-        // Actualizar marcador con color según precisión EXTREMA
+        // Actualizar marcador con color según precisión EXTREMA (actualización instantánea)
         if (marker) {
           marker.setPosition({ lat: newPos.lat, lng: newPos.lng });
           // Verde solo para < 5m (precisión premium), resto rechazado
@@ -256,7 +282,7 @@ export default function TrackerPage() {
           });
         }
 
-        // Centrar mapa en la ubicación actual (SIEMPRE, incluso en segundo plano)
+        // Centrar mapa en la ubicación actual (SIEMPRE, incluso en segundo plano - actualización instantánea)
         if (map) {
           map.panTo({ lat: newPos.lat, lng: newPos.lng });
         }
@@ -280,16 +306,16 @@ export default function TrackerPage() {
             }
             
             // FILTRO 3: Velocidad mínima - Debe moverse rápido (> 3 km/h)
-            if (speedKmh < 3) {
+            if (smoothSpeed < 3) {
               consecutiveStillCountRef.current++;
-              console.log(`🐌 Demasiado lento: ${speedKmh.toFixed(1)} km/h < 3 km/h (x${consecutiveStillCountRef.current})`);
+              console.log(`🐌 Demasiado lento: ${smoothSpeed.toFixed(1)} km/h < 3 km/h (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
             // FILTRO 4: Doble verificación - Distancia < 30m Y velocidad < 8 km/h
-            if (distanceMeters < 30 && speedKmh < 8) {
+            if (distanceMeters < 30 && smoothSpeed < 8) {
               consecutiveStillCountRef.current++;
-              console.log(`⚠️ Movimiento inseguro: ${distanceMeters.toFixed(2)}m a ${speedKmh.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
+              console.log(`⚠️ Movimiento inseguro: ${distanceMeters.toFixed(2)}m a ${smoothSpeed.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
@@ -312,7 +338,7 @@ export default function TrackerPage() {
             
             // Si llegamos aquí, hay movimiento REAL - resetear contador
             if (consecutiveStillCountRef.current > 0) {
-              console.log(`✅ MOVIMIENTO REAL detectado: ${distanceMeters.toFixed(1)}m a ${speedKmh.toFixed(1)} km/h (desbloqueo tras ${consecutiveStillCountRef.current} quietos)`);
+              console.log(`✅ MOVIMIENTO REAL detectado: ${distanceMeters.toFixed(1)}m a ${smoothSpeed.toFixed(1)} km/h (desbloqueo tras ${consecutiveStillCountRef.current} quietos)`);
             }
             consecutiveStillCountRef.current = 0;
             
@@ -342,13 +368,12 @@ export default function TrackerPage() {
             // Agregar la nueva posición real (solo si pasó los filtros)
             updatedPath.push(newPos);
             
-            // Calcular y actualizar distancia
-            setTotalDistance((prev) => {
-              const newTotal = prev + distance;
-              const gapTag = (distance > 0.1 || timeGap > 30000) ? ' [INTERPOLADO]' : '';
-              console.log('✅ Distancia:', newTotal.toFixed(3), 'km (+', distanceMeters.toFixed(1), 'm)' + gapTag);
-              return newTotal;
-            });
+            // Actualizar distancia total usando ref para actualización instantánea
+            totalDistanceRef.current += distance;
+            setTotalDistance(totalDistanceRef.current);
+            
+            const gapTag = (distance > 0.1 || timeGap > 30000) ? ' [INTERPOLADO]' : '';
+            console.log('✅ Distancia:', totalDistanceRef.current.toFixed(3), 'km (+', distanceMeters.toFixed(1), 'm)' + gapTag);
           } else {
             // Primera posición
             updatedPath.push(newPos);
@@ -393,9 +418,9 @@ export default function TrackerPage() {
         }
       },
       {
-        enableHighAccuracy: true, // GPS de alta precisión
-        timeout: 5000, // Timeout de 5 segundos (más rápido)
-        maximumAge: 0, // Nunca usar caché, siempre posición fresca
+        enableHighAccuracy: true, // GPS de alta precisión (premium)
+        timeout: 3000, // Timeout de 3 segundos (más rápido = actualizaciones más frecuentes)
+        maximumAge: 0, // Nunca usar caché, siempre posición fresca en tiempo real
       }
     );
   };
@@ -517,52 +542,71 @@ export default function TrackerPage() {
         </div>
       </div>
 
-      {/* Stats Panel */}
+      {/* Stats Panel - Mejorado con animaciones */}
       <div className="bg-white border-b border-gray-200 p-4">
         <div className="grid grid-cols-2 gap-4 mb-3">
-          <div className="bg-blue-50 rounded-lg p-3">
-            <p className="text-xs text-gray-600 mb-1">📏 Distancia Total</p>
-            <p className="text-2xl font-bold text-blue-900">
-              {totalDistance.toFixed(2)} km
+          <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 shadow-sm border border-blue-200 transition-all duration-300 hover:shadow-md">
+            <p className="text-xs font-semibold text-blue-700 mb-2 flex items-center gap-1">
+              📏 DISTANCIA RECORRIDA
+            </p>
+            <p className="text-3xl font-bold text-blue-900 mb-1 tracking-tight">
+              {totalDistance.toFixed(3)} km
             </p>
             {isTracking && (
-              <p className="text-xs text-blue-600 mt-1">
-                {path.length} puntos GPS
-              </p>
+              <div className="flex items-center gap-2">
+                <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
+                <p className="text-xs text-blue-600 font-medium">
+                  {path.length} puntos GPS registrados
+                </p>
+              </div>
             )}
           </div>
-          <div className="bg-green-50 rounded-lg p-3">
-            <p className="text-xs text-gray-600 mb-1">⚡ Velocidad Actual</p>
-            <p className="text-2xl font-bold text-green-900">
-              {currentSpeed.toFixed(0)} km/h
+          <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-4 shadow-sm border border-green-200 transition-all duration-300 hover:shadow-md">
+            <p className="text-xs font-semibold text-green-700 mb-2 flex items-center gap-1">
+              ⚡ VELOCIDAD ACTUAL
+            </p>
+            <p className="text-3xl font-bold text-green-900 mb-1 tracking-tight">
+              {currentSpeed.toFixed(1)} <span className="text-lg">km/h</span>
             </p>
             {isTracking && (
-              <p className="text-xs text-green-600 mt-1">
-                En tiempo real
-              </p>
+              <div className="flex items-center gap-2">
+                <span className="inline-block w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                <p className="text-xs text-green-600 font-medium">
+                  Actualización continua
+                </p>
+              </div>
             )}
           </div>
         </div>
         
-        {/* Indicadores de precisión y estado */}
+        {/* Indicadores de precisión y estado - Mejorados */}
         {isTracking && (
           <div className="grid grid-cols-2 gap-4">
-            <div className={`rounded-lg p-2 ${
-              accuracy < 20 ? 'bg-green-100' : 
-              accuracy < 50 ? 'bg-yellow-100' : 'bg-red-100'
+            <div className={`rounded-xl p-3 shadow-sm border transition-all duration-300 ${
+              accuracy < 5 ? 'bg-gradient-to-br from-green-50 to-green-100 border-green-300' : 
+              accuracy < 10 ? 'bg-gradient-to-br from-yellow-50 to-yellow-100 border-yellow-300' : 
+              'bg-gradient-to-br from-red-50 to-red-100 border-red-300'
             }`}>
-              <p className="text-xs text-gray-600">🎯 Precisión GPS</p>
-              <p className="text-sm font-bold">
-                ±{accuracy.toFixed(0)}m {
-                  accuracy < 20 ? '🟢 Excelente' : 
-                  accuracy < 50 ? '🟡 Buena' : '🔴 Baja'
+              <p className="text-xs font-semibold text-gray-700 mb-1">🎯 Precisión GPS</p>
+              <p className="text-lg font-bold">
+                ±{accuracy.toFixed(1)}m {
+                  accuracy < 5 ? '🟢 PREMIUM' : 
+                  accuracy < 10 ? '🟡 BUENA' : '🔴 BAJA'
                 }
               </p>
+              {accuracy < 5 && (
+                <p className="text-xs text-green-700 font-medium mt-1">
+                  ±0.5m precisión real
+                </p>
+              )}
             </div>
-            <div className="bg-purple-50 rounded-lg p-2">
-              <p className="text-xs text-gray-600">🕐 Última actualización</p>
-              <p className="text-sm font-bold">
-                {lastUpdate ? lastUpdate.toLocaleTimeString('es-AR') : '--:--'}
+            <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-3 shadow-sm border border-purple-200">
+              <p className="text-xs font-semibold text-purple-700 mb-1">🕐 Actualización</p>
+              <p className="text-lg font-bold text-purple-900">
+                {lastUpdate ? lastUpdate.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '--:--:--'}
+              </p>
+              <p className="text-xs text-purple-600 font-medium mt-1">
+                Tiempo real
               </p>
             </div>
           </div>
