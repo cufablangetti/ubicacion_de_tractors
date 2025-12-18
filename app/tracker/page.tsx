@@ -59,19 +59,61 @@ export default function TrackerPage() {
     };
   }, [router]);
 
-  // Efecto separado para notificaciones de segundo plano
+  // Efecto separado para mantener rastreo en segundo plano
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden' && isTracking) {
-        // Mostrar notificación persistente
+        console.log('🔄 App en segundo plano - GPS continúa activo');
+        
+        // Guardar timestamp cuando va a background
+        localStorage.setItem('background_timestamp', Date.now().toString());
+        
+        // Mostrar notificación silenciosa
         if ('Notification' in window && Notification.permission === 'granted') {
           new Notification('DIBIAGI GPS Activo', {
-            body: 'El rastreo GPS continúa en segundo plano',
+            body: '📍 El rastreo GPS continúa registrando tu recorrido',
             icon: '/icon-192x192.png',
             badge: '/icon-192x192.png',
             tag: 'gps-tracking',
-            requireInteraction: true,
+            requireInteraction: false,
+            silent: true,
           });
+        }
+      } else if (document.visibilityState === 'visible' && isTracking) {
+        console.log('✅ App volvió al primer plano - verificando continuidad');
+        
+        // Verificar tiempo en background
+        const backgroundTime = localStorage.getItem('background_timestamp');
+        if (backgroundTime) {
+          const timeInBackground = Date.now() - parseInt(backgroundTime);
+          const minutesInBackground = Math.floor(timeInBackground / 60000);
+          
+          if (minutesInBackground > 0) {
+            console.log(`⏱️ Estuvo ${minutesInBackground} minutos en segundo plano`);
+            
+            // Mostrar notificación de continuidad
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('GPS Continuo', {
+                body: `✅ Rastreo registrado durante ${minutesInBackground} min en segundo plano`,
+                icon: '/icon-192x192.png',
+                tag: 'gps-resume',
+              });
+            }
+          }
+          
+          localStorage.removeItem('background_timestamp');
+        }
+        
+        // Forzar actualización del mapa y polyline con todas las posiciones
+        if (path.length > 0 && map) {
+          const lastPos = path[path.length - 1];
+          map.panTo({ lat: lastPos.lat, lng: lastPos.lng });
+          
+          // Actualizar polyline con todos los puntos
+          if (polylineRef.current && path.length > 1) {
+            polylineRef.current.setPath(path.map(p => ({ lat: p.lat, lng: p.lng })));
+            console.log('🗺️ Polyline actualizado con', path.length, 'puntos después de volver');
+          }
         }
       }
     };
@@ -81,7 +123,7 @@ export default function TrackerPage() {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [isTracking]);
+  }, [isTracking, path, map]);
 
   const initializeMap = async () => {
     if (!mapRef.current) return;
@@ -209,28 +251,59 @@ export default function TrackerPage() {
           });
         }
 
-        // Centrar mapa en la ubicación actual
-        if (map && document.visibilityState === 'visible') {
+        // Centrar mapa en la ubicación actual (SIEMPRE, incluso en segundo plano)
+        if (map) {
           map.panTo({ lat: newPos.lat, lng: newPos.lng });
         }
 
         // Actualizar ruta y calcular distancia
         setPath((prevPath) => {
-          const updatedPath = [...prevPath, newPos];
+          let updatedPath = [...prevPath];
 
-          // Calcular y actualizar distancia
+          // Detectar gaps (saltos grandes por segundo plano) y manejarlos
           if (prevPath.length > 0) {
             const lastPos = prevPath[prevPath.length - 1];
             const distance = calculateDistance(lastPos, newPos);
+            const timeGap = newPos.timestamp - lastPos.timestamp; // milisegundos
             
-            // Solo agregar distancia si es mayor a 2 metros (reducir ruido GPS)
-            if (distance > 0.002) { // 0.002 km = 2 metros
+            // Si hay un gap grande (> 100m o > 30s), interpolar puntos
+            if (distance > 0.1 || timeGap > 30000) {
+              console.log(`⚠️ GAP DETECTADO: ${(distance * 1000).toFixed(0)}m en ${(timeGap / 1000).toFixed(0)}s`);
+              
+              // Interpolar puntos intermedios para suavizar la ruta
+              const numPoints = Math.min(Math.floor(distance / 0.05), 10); // Máx 10 puntos
+              
+              if (numPoints > 1) {
+                console.log(`🔗 Interpolando ${numPoints} puntos para suavizar gap`);
+                
+                for (let i = 1; i <= numPoints; i++) {
+                  const ratio = i / (numPoints + 1);
+                  updatedPath.push({
+                    lat: lastPos.lat + (newPos.lat - lastPos.lat) * ratio,
+                    lng: lastPos.lng + (newPos.lng - lastPos.lng) * ratio,
+                    timestamp: lastPos.timestamp + (newPos.timestamp - lastPos.timestamp) * ratio,
+                    speed: lastPos.speed,
+                    accuracy: Math.max(lastPos.accuracy || 0, newPos.accuracy || 0),
+                  });
+                }
+              }
+            }
+            
+            // Agregar la nueva posición real
+            updatedPath.push(newPos);
+            
+            // Calcular distancia solo si es > 2 metros
+            if (distance > 0.002) {
               setTotalDistance((prev) => {
                 const newTotal = prev + distance;
-                console.log('� Distancia acumulada:', newTotal.toFixed(3), 'km (+', (distance * 1000).toFixed(1), 'm)');
+                const gapTag = (distance > 0.1 || timeGap > 30000) ? ' [INTERPOLADO]' : '';
+                console.log('📏 Distancia:', newTotal.toFixed(3), 'km (+', (distance * 1000).toFixed(1), 'm)' + gapTag);
                 return newTotal;
               });
             }
+          } else {
+            // Primera posición
+            updatedPath.push(newPos);
           }
 
           // Actualizar polyline inmediatamente
