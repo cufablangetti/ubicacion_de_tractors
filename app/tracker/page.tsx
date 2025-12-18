@@ -28,6 +28,8 @@ export default function TrackerPage() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const watchIdRef = useRef<number | null>(null);
   const wakeLockRef = useRef<any>(null);
+  const positionBufferRef = useRef<Position[]>([]); // Buffer para promediar posiciones
+  const consecutiveStillCountRef = useRef<number>(0); // Contador de posiciones "quietas"
 
   useEffect(() => {
     const userId = localStorage.getItem('userId');
@@ -211,12 +213,14 @@ export default function TrackerPage() {
     setIsTracking(true);
     setPath([]);
     setTotalDistance(0);
+    positionBufferRef.current = []; // Limpiar buffer
+    consecutiveStillCountRef.current = 0; // Resetear contador
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
-        // FILTRO 1: Precisión mínima requerida (solo < 15 metros para evitar ruido)
-        if (position.coords.accuracy > 15) {
-          console.log('⚠️ Precisión insuficiente ignorada:', position.coords.accuracy.toFixed(1), 'm');
+        // FILTRO 1: Precisión ULTRA ESTRICTA - Solo acepta GPS excelente (< 10 metros)
+        if (position.coords.accuracy > 10) {
+          console.log('❌ Precisión insuficiente:', position.coords.accuracy.toFixed(1), 'm (requiere < 10m)');
           return;
         }
 
@@ -267,19 +271,39 @@ export default function TrackerPage() {
             const timeGap = newPos.timestamp - lastPos.timestamp; // milisegundos
             const distanceMeters = distance * 1000; // Convertir a metros
             
-            // FILTRO 2: Ignorar micro-movimientos (ruido GPS cuando estás quieto)
-            // Si la distancia es < 5 metros Y la velocidad es casi 0, es ruido
-            if (distanceMeters < 5 && speedKmh < 1.5) {
-              console.log(`🔇 RUIDO ignorado: ${distanceMeters.toFixed(1)}m, velocidad ${speedKmh.toFixed(1)} km/h`);
-              // Actualizar solo el marcador (no agregar a la ruta)
+            // FILTRO 2: ULTRA ESTRICTO - Ignorar TODO movimiento menor a 10 metros
+            if (distanceMeters < 10) {
+              consecutiveStillCountRef.current++;
+              console.log(`🔇 RUIDO ignorado: ${distanceMeters.toFixed(1)}m (quieto x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 3: Movimiento muy lento - solo registrar si supera 8 metros
-            if (distanceMeters < 8 && speedKmh < 3) {
-              console.log(`⏸️ Movimiento lento ignorado: ${distanceMeters.toFixed(1)}m`);
+            // FILTRO 3: Velocidad - Debe estar moviéndose de verdad (> 2 km/h)
+            if (speedKmh < 2) {
+              consecutiveStillCountRef.current++;
+              console.log(`🐌 Velocidad baja: ${speedKmh.toFixed(1)} km/h (quieto x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
+            
+            // FILTRO 4: Combinado - Si distancia < 15m Y velocidad < 5 km/h = probablemente ruido
+            if (distanceMeters < 15 && speedKmh < 5) {
+              consecutiveStillCountRef.current++;
+              console.log(`⚠️ Movimiento dudoso ignorado: ${distanceMeters.toFixed(1)}m a ${speedKmh.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
+              return prevPath;
+            }
+            
+            // FILTRO 5: Modo "BLOQUEADO" - Si ha estado quieto por mucho tiempo (>20 intentos), 
+            // requiere movimiento MUY significativo (>20m) para desbloquearse
+            if (consecutiveStillCountRef.current > 20 && distanceMeters < 20) {
+              console.log(`🔒 BLOQUEADO: ${distanceMeters.toFixed(1)}m insuficiente (requiere >20m tras ${consecutiveStillCountRef.current} quietos)`);
+              return prevPath;
+            }
+            
+            // Si llegamos aquí, hay movimiento REAL - resetear contador
+            if (consecutiveStillCountRef.current > 0) {
+              console.log(`✅ MOVIMIENTO REAL detectado: ${distanceMeters.toFixed(1)}m a ${speedKmh.toFixed(1)} km/h (desbloqueo tras ${consecutiveStillCountRef.current} quietos)`);
+            }
+            consecutiveStillCountRef.current = 0;
             
             // Si hay un gap grande (> 100m o > 30s), interpolar puntos
             if (distance > 0.1 || timeGap > 30000) {
