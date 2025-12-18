@@ -54,7 +54,58 @@ export default function TrackerPage() {
       Notification.requestPermission();
     }
 
+    // GUARDAR ANTES DE CERRAR: Listener para beforeunload
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isTracking) {
+        // Guardar estado completo
+        localStorage.setItem('tracking_active', 'true');
+        localStorage.setItem('tracking_distance', totalDistanceRef.current.toString());
+        localStorage.setItem('tracking_last_update', new Date().toISOString());
+        localStorage.setItem('tracking_path_length', path.length.toString());
+        
+        console.log('💾 Estado guardado antes de cerrar página');
+        
+        // Mensaje de advertencia (opcional)
+        const message = 'El tracking GPS está activo. ¿Seguro que quieres salir?';
+        e.preventDefault();
+        e.returnValue = message;
+        return message;
+      }
+    };
+    
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // RECUPERACIÓN AL CARGAR: Detectar si había tracking activo
+    const wasTracking = localStorage.getItem('tracking_active') === 'true';
+    const lastUpdateStr = localStorage.getItem('tracking_last_update');
+    
+    if (wasTracking && lastUpdateStr) {
+      const lastUpdate = new Date(lastUpdateStr);
+      const minutesSinceLastUpdate = Math.floor((Date.now() - lastUpdate.getTime()) / 60000);
+      
+      console.log(`🔍 Detectado tracking previo (hace ${minutesSinceLastUpdate} minutos)`);
+      
+      // Si el tracking era reciente (menos de 2 horas), ofrecer recuperar
+      if (minutesSinceLastUpdate < 120) {
+        setTimeout(() => {
+          const shouldRecover = confirm(
+            `🔄 Tracking interrumpido hace ${minutesSinceLastUpdate} minutos.\n\n` +
+            `¿Deseas recuperar el recorrido?\n\n` +
+            `Se restaurarán todos los datos guardados.`
+          );
+          
+          if (shouldRecover) {
+            recoverPreviousTracking(userId);
+          } else {
+            // Limpiar tracking antiguo
+            localStorage.setItem('tracking_active', 'false');
+          }
+        }, 1000); // Delay para que cargue el mapa primero
+      }
+    }
+
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
@@ -65,7 +116,7 @@ export default function TrackerPage() {
         wakeLockRef.current.release();
       }
     };
-  }, [router]);
+  }, [router, isTracking, path, totalDistanceRef]);
 
   // Efecto separado para mantener rastreo en segundo plano y recuperar datos
   useEffect(() => {
@@ -119,37 +170,69 @@ export default function TrackerPage() {
               const newPositions = allPositions.filter(p => p.timestamp > lastKnownPos.timestamp);
               
               if (newPositions.length > 0) {
-                console.log(`📦 Recuperando ${newPositions.length} posiciones del background`);
+                console.log(`📦 Recuperando ${newPositions.length} posiciones del background (MODO ULTRA PERMISIVO)`);
                 
-                // Agregar las posiciones recuperadas al path
+                // Ordenar por timestamp
+                newPositions.sort((a, b) => a.timestamp - b.timestamp);
+                
+                // Agregar las posiciones recuperadas al path - ULTRA PERMISIVO
                 setPath(prevPath => {
                   const mergedPath = [...prevPath];
+                  let addedCount = 0;
+                  let rejectedCount = 0;
                   
-                  newPositions.forEach(newPos => {
-                    // Verificar que no esté duplicada
+                  newPositions.forEach((newPos, index) => {
+                    // SOLO rechazar duplicados exactos o errores GPS extremos
                     const isDuplicate = mergedPath.some(p => 
-                      Math.abs(p.timestamp - newPos.timestamp) < 1000
+                      Math.abs(p.timestamp - newPos.timestamp) < 500 &&
+                      Math.abs(p.lat - newPos.lat) < 0.000001 &&
+                      Math.abs(p.lng - newPos.lng) < 0.000001
                     );
                     
-                    if (!isDuplicate) {
-                      // Calcular distancia si hay posición previa
-                      if (mergedPath.length > 0) {
-                        const lastPos = mergedPath[mergedPath.length - 1];
-                        const distance = calculateDistance(lastPos, newPos);
-                        const distanceMeters = distance * 1000;
-                        
-                        // Aplicar filtros básicos
-                        if (distanceMeters >= 20 && newPos.accuracy && newPos.accuracy < 5) {
-                          mergedPath.push(newPos);
-                          totalDistanceRef.current += distance;
-                          console.log(`✅ Recuperado: +${distanceMeters.toFixed(1)}m`);
+                    // Rechazar solo GPS extremadamente malo (> 50m)
+                    const isVeryBadGPS = newPos.accuracy && newPos.accuracy > 50;
+                    
+                    if (isDuplicate) {
+                      rejectedCount++;
+                      return;
+                    }
+                    
+                    if (isVeryBadGPS) {
+                      rejectedCount++;
+                      if (index % 20 === 0) console.log(`⚠️ GPS muy malo: ${newPos.accuracy?.toFixed(0)}m`);
+                      return;
+                    }
+                    
+                    // Calcular distancia si hay posición previa
+                    if (mergedPath.length > 0) {
+                      const lastPos = mergedPath[mergedPath.length - 1];
+                      const distance = calculateDistance(lastPos, newPos);
+                      const distanceMeters = distance * 1000;
+                      const timeGap = newPos.timestamp - lastPos.timestamp;
+                      
+                      // Solo rechazar saltos IMPOSIBLES (> 1km en < 5s)
+                      if (distanceMeters > 1000 && timeGap < 5000) {
+                        const speedKmh = (distanceMeters / 1000) / (timeGap / 3600000);
+                        if (speedKmh > 200) {
+                          rejectedCount++;
+                          console.log(`⚠️ Salto imposible: ${distanceMeters.toFixed(0)}m en ${(timeGap/1000).toFixed(1)}s`);
+                          return;
                         }
-                      } else {
-                        mergedPath.push(newPos);
+                      }
+                      
+                      // ACEPTAR TODO LO DEMÁS - Sin filtros de distancia mínima ni velocidad
+                      totalDistanceRef.current += distance;
+                      addedCount++;
+                      
+                      if (index % 10 === 0) {
+                        console.log(`✅ Recuperado ${index + 1}/${newPositions.length}: +${distanceMeters.toFixed(1)}m (precisión: ${newPos.accuracy?.toFixed(1) || 'N/A'}m)`);
                       }
                     }
+                    
+                    mergedPath.push(newPos);
                   });
                   
+                  console.log(`✅ ${addedCount} posiciones añadidas, ${rejectedCount} rechazadas`);
                   return mergedPath;
                 });
                 
@@ -382,30 +465,37 @@ export default function TrackerPage() {
             const timeGap = newPos.timestamp - lastPos.timestamp; // milisegundos
             const distanceMeters = distance * 1000; // Convertir a metros
             
-            // FILTRO 2: EXTREMO - Movimiento mínimo 20 metros para precisión ±0.5m
-            if (distanceMeters < 20) {
+            // FILTRO 2: Movimiento mínimo ADAPTATIVO
+            // Si está en movimiento (velocidad > 2 km/h), usar 15m
+            // Si está casi quieto (velocidad < 2 km/h), usar 20m
+            const minDistance = smoothSpeed > 2 ? 15 : 20;
+            
+            if (distanceMeters < minDistance) {
               consecutiveStillCountRef.current++;
-              console.log(`🔇 Micro-movimiento ignorado: ${distanceMeters.toFixed(2)}m < 20m (x${consecutiveStillCountRef.current})`);
+              console.log(`🔇 Micro-movimiento ignorado: ${distanceMeters.toFixed(2)}m < ${minDistance}m a ${smoothSpeed.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 3: Velocidad mínima - Debe moverse rápido (> 3 km/h)
-            if (smoothSpeed < 3) {
+            // FILTRO 3: Velocidad mínima ADAPTATIVO
+            // Si el gap de tiempo es grande (>10s), ser más permisivo con velocidad baja
+            const minSpeed = timeGap > 10000 ? 1 : 3; // 1 km/h si gap >10s, sino 3 km/h
+            
+            if (smoothSpeed < minSpeed && distanceMeters < 30) {
               consecutiveStillCountRef.current++;
-              console.log(`🐌 Demasiado lento: ${smoothSpeed.toFixed(1)} km/h < 3 km/h (x${consecutiveStillCountRef.current})`);
+              console.log(`🐌 Demasiado lento: ${smoothSpeed.toFixed(1)} km/h < ${minSpeed} km/h (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 4: Doble verificación - Distancia < 30m Y velocidad < 8 km/h
-            if (distanceMeters < 30 && smoothSpeed < 8) {
+            // FILTRO 4: Doble verificación - Solo si AMBOS son bajos
+            if (distanceMeters < 25 && smoothSpeed < 5 && timeGap < 10000) {
               consecutiveStillCountRef.current++;
-              console.log(`⚠️ Movimiento inseguro: ${distanceMeters.toFixed(2)}m a ${smoothSpeed.toFixed(1)} km/h (x${consecutiveStillCountRef.current})`);
+              console.log(`⚠️ Movimiento inseguro: ${distanceMeters.toFixed(2)}m a ${smoothSpeed.toFixed(1)} km/h en ${(timeGap/1000).toFixed(1)}s (x${consecutiveStillCountRef.current})`);
               return prevPath;
             }
             
-            // FILTRO 5: Modo BLOQUEADO EXTREMO - Si quieto >15 intentos, requiere >30m
-            if (consecutiveStillCountRef.current > 15 && distanceMeters < 30) {
-              console.log(`🔒 BLOQUEADO: ${distanceMeters.toFixed(2)}m < 30m requeridos (tras ${consecutiveStillCountRef.current} rechazos)`);
+            // FILTRO 5: Modo BLOQUEADO - Si quieto >20 intentos, requiere >25m o velocidad >5 km/h
+            if (consecutiveStillCountRef.current > 20 && distanceMeters < 25 && smoothSpeed < 5) {
+              console.log(`🔒 BLOQUEADO: ${distanceMeters.toFixed(2)}m < 25m o ${smoothSpeed.toFixed(1)} km/h < 5 km/h (tras ${consecutiveStillCountRef.current} rechazos)`);
               return prevPath;
             }
             
@@ -580,6 +670,151 @@ export default function TrackerPage() {
 
   const toRad = (value: number): number => {
     return (value * Math.PI) / 180;
+  };
+
+  const recoverPreviousTracking = (userId: string | null) => {
+    if (!userId) return;
+    
+    console.log('🔄 Iniciando recuperación de tracking previo...');
+    
+    try {
+      const storageKey = `route_${userId}_${new Date().toISOString().split('T')[0]}`;
+      const storedData = localStorage.getItem(storageKey);
+      const savedDistance = parseFloat(localStorage.getItem('tracking_distance') || '0');
+      
+      if (storedData) {
+        const allPositions = JSON.parse(storedData) as Position[];
+        
+        if (allPositions.length > 0) {
+          console.log(`📦 Recuperando ${allPositions.length} posiciones del localStorage`);
+          
+          // Ordenar por timestamp para asegurar orden cronológico
+          allPositions.sort((a, b) => a.timestamp - b.timestamp);
+          
+          // FILTROS ULTRA PERMISIVOS para recuperación - Solo eliminar duplicados y errores obvios
+          const validPositions: Position[] = [];
+          let recoveredDistance = 0;
+          let rejectedCount = 0;
+          
+          allPositions.forEach((pos, index) => {
+            // SOLO rechazar si:
+            // 1. Es duplicado exacto (mismo timestamp Y mismas coordenadas)
+            // 2. GPS extremadamente malo (> 50m de error)
+            // 3. Salto imposible (> 1km en < 5 segundos)
+            
+            // Check 1: Duplicado exacto
+            const isDuplicate = validPositions.some(p => 
+              Math.abs(p.timestamp - pos.timestamp) < 500 && // Más estricto con timestamp
+              Math.abs(p.lat - pos.lat) < 0.000001 && // Prácticamente el mismo punto
+              Math.abs(p.lng - pos.lng) < 0.000001
+            );
+            
+            if (isDuplicate) {
+              rejectedCount++;
+              if (index % 50 === 0) console.log(`⚠️ Duplicado rechazado en posición ${index}`);
+              return;
+            }
+            
+            // Check 2: GPS extremadamente malo
+            if (pos.accuracy && pos.accuracy > 50) {
+              rejectedCount++;
+              if (index % 50 === 0) console.log(`⚠️ GPS muy malo rechazado: ${pos.accuracy.toFixed(0)}m`);
+              return;
+            }
+            
+            // Check 3: Salto imposible (> 1km en < 5s = > 720 km/h)
+            if (validPositions.length > 0) {
+              const lastPos = validPositions[validPositions.length - 1];
+              const distance = calculateDistance(lastPos, pos);
+              const distanceMeters = distance * 1000;
+              const timeGap = pos.timestamp - lastPos.timestamp;
+              
+              if (distanceMeters > 1000 && timeGap < 5000) {
+                const speedKmh = (distanceMeters / 1000) / (timeGap / 3600000);
+                if (speedKmh > 200) {
+                  rejectedCount++;
+                  console.log(`⚠️ Salto imposible rechazado: ${distanceMeters.toFixed(0)}m en ${(timeGap/1000).toFixed(1)}s = ${speedKmh.toFixed(0)} km/h`);
+                  return;
+                }
+              }
+              
+              // Calcular distancia acumulada
+              recoveredDistance += distance;
+              
+              // Log progreso cada 25 puntos
+              if (index % 25 === 0) {
+                console.log(`✅ Punto ${index + 1}/${allPositions.length}: ${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)} (+${distanceMeters.toFixed(1)}m, precisión: ${pos.accuracy?.toFixed(1) || 'N/A'}m)`);
+              }
+            }
+            
+            // ACEPTAR POSICIÓN - No importa distancia mínima, velocidad, etc.
+            validPositions.push(pos);
+          });
+          
+          console.log(`✅ ${validPositions.length}/${allPositions.length} posiciones recuperadas (${rejectedCount} rechazadas)`);
+          console.log(`📏 Distancia recuperada: ${recoveredDistance.toFixed(3)} km (guardada: ${savedDistance.toFixed(3)} km)`);
+          
+          // Restaurar el path
+          setPath(validPositions);
+          totalDistanceRef.current = savedDistance || recoveredDistance;
+          setTotalDistance(totalDistanceRef.current);
+          
+          // Actualizar mapa después de un delay
+          setTimeout(() => {
+            if (validPositions.length > 0 && map) {
+              const lastPos = validPositions[validPositions.length - 1];
+              
+              // Centrar mapa en última posición
+              map.panTo({ lat: lastPos.lat, lng: lastPos.lng });
+              
+              // Actualizar marcador
+              if (marker) {
+                marker.setPosition({ lat: lastPos.lat, lng: lastPos.lng });
+              }
+              
+              // Dibujar polyline completo
+              if (validPositions.length > 1) {
+                const pathCoords = validPositions.map(p => ({ lat: p.lat, lng: p.lng }));
+                
+                if (polylineRef.current) {
+                  polylineRef.current.setPath(pathCoords);
+                } else {
+                  polylineRef.current = new google.maps.Polyline({
+                    path: pathCoords,
+                    geodesic: true,
+                    strokeColor: '#FF0000',
+                    strokeOpacity: 1.0,
+                    strokeWeight: 4,
+                    map: map,
+                  });
+                }
+                
+                console.log('🗺️ Mapa y polyline restaurados con', validPositions.length, 'puntos');
+              }
+            }
+            
+            // Mostrar notificación de éxito
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('Tracking Recuperado', {
+                body: `✅ ${validPositions.length} posiciones y ${totalDistanceRef.current.toFixed(2)} km recuperados`,
+                icon: '/icon.svg',
+              });
+            }
+            
+            // Reactivar tracking automáticamente
+            alert(`✅ Tracking recuperado:\n\n` +
+                  `📍 ${validPositions.length} posiciones\n` +
+                  `📏 ${totalDistanceRef.current.toFixed(3)} km\n\n` +
+                  `¿Continuar rastreando?`);
+            
+            startTracking();
+          }, 1000);
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error recuperando tracking:', error);
+      alert('❌ Error al recuperar el tracking anterior');
+    }
   };
 
   const savePositionToStorage = (position: Position) => {
