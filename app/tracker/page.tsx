@@ -430,9 +430,6 @@ export default function TrackerPage() {
 
         console.log(`📍 GPS PREMIUM: ${newPos.lat.toFixed(7)}, ${newPos.lng.toFixed(7)} | Precisión: ${position.coords.accuracy.toFixed(2)}m (±0.5m) | Velocidad: ${smoothSpeed.toFixed(2)} km/h | Visibilidad: ${document.visibilityState}`);
 
-        // GUARDAR INMEDIATAMENTE en localStorage (antes de filtros) para recuperación en background
-        savePositionToStorage(newPos);
-
         // Actualizar marcador con color según precisión EXTREMA (actualización instantánea)
         if (marker) {
           marker.setPosition({ lat: newPos.lat, lng: newPos.lng });
@@ -542,6 +539,10 @@ export default function TrackerPage() {
             // Agregar la nueva posición real (solo si pasó los filtros)
             updatedPath.push(newPos);
             
+            // GUARDAR en localStorage SOLO LAS POSICIONES QUE PASARON LOS FILTROS
+            // Esto asegura que al recuperar, solo tengamos movimiento real, no ruido GPS
+            savePositionToStorage(newPos);
+            
             // Actualizar distancia total usando ref para actualización instantánea
             totalDistanceRef.current += distance;
             setTotalDistance(totalDistanceRef.current);
@@ -551,7 +552,9 @@ export default function TrackerPage() {
           } else {
             // Primera posición
             updatedPath.push(newPos);
-            console.log('🎯 Primera posición registrada');
+            // Guardar también la primera posición en localStorage
+            savePositionToStorage(newPos);
+            console.log('🎯 Primera posición registrada y guardada');
           }
 
           // Actualizar polyline inmediatamente
